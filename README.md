@@ -10,8 +10,10 @@ As multiple programs can access the transceiver, there must be some way to send 
 
 The structure of a command is '<Identifier>;<Command>' and similarly is the structure of a response '<Identifier>;<Response>'. The identifier should be a (small) string of characters which should not contain a semicolon. The command should not start with a byte containing the remaining length: the length is already known. (Thread Rfxcom, which is described below, takes care of the length byte.) Shown below is an example, in which a program, with identifier 'monzm', switches a light on. The response is an acknowledge from the transceiver that the command has been sent.
 
+```
   20201124 065201 mqtt cmd <b'monzm;\x11\x00\x00\x02#\x04\x12\x01\x01\x0fP'>
   20201124 065202 mqtt rsp <b'monzm;\x02\x01\x00\x00'>
+```
 
 Note that if no response is received from the transceiver within 3.5 seconds, a 'negative acknowledge' (NAK) is generated. The content of this NAK is <b'\x02\x01\x00\x02'>
 
