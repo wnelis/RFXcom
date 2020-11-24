@@ -22,7 +22,7 @@ The typical flow of events for a source of commands is to subscribe to topic 'rf
 ## Script mqtt.rfxcom.py
 Script mqtt.rfxcom.py maps a command received via topic 'rfxcom/command' onto a command send to the RFXcom transceiver. It maps the response from the transceiver onto a response on topic 'rfxcom/response', using the (source) identifier and the packet sequence number from the associated command. The script also maps any unsolicited response onto a message on topic 'rfxcom/message'. The latter does not contain a source identifier.
 
-The script contains a thread named 'Dispatcher'. It takes a command, sends it to the transceiver and waits for the response. If no response comes in, a NACK response is generated. The next command is not send to the transceiver until a response is either received or generated. This thread thus implements a simple flow control mechanism, using a transmit window of only one packet.
+The script contains a thread named 'Dispatcher'. It takes a command, sends it to the transceiver and waits for the response. If no response comes in, a NAK response is generated. The next command is not send to the transceiver until a response is either received or generated. This thread thus implements a simple flow control mechanism, using a transmit window of only one packet.
 
 The thread 'Dispatcher' also makes the sequence numbers between any source and this script and between this script and the transceiver independent of one another. It rewrites the sequence number in the commands send to the transceiver, and rewrites the sequence number in a response before sending it to it's source. The sequence number in an unsolicited response is not modified.
 
