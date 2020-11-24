@@ -19,7 +19,7 @@ The thread 'Dispatcher' also makes the sequence numbers between any source and t
 
 Below a top level view of the structure of the script is shown.
 
-<img src="https://raw.githubusercontent.com/wnelis/RFXcom/master/docs/tlad.png" >
+<img src="https://github.com/wnelis/RFXcom/blob/main/docs/tlad.png" >
 
 Thread Mqtt initiates and maintains the connection with the MQTT broker. It moves packets between queues and the MQTT broker without interpretation or modification. Similarly, thread Rfxcom initiates and maintains the (serial) connection with the transceiver, and it moves packets between queues and the transceiver without interpretation or modification, however with one exception: a reset command is silently ignored. As a result thread Dispatcher does not have to take care of the state of the connection to either the transceiver or the broker and has a simple interface in both directions (a queue). The queues also act as a buffer, to smoothen the flow if necessary. 
 
