@@ -10,8 +10,20 @@ As multiple programs can access the transceiver, there must be some way to send 
 
 The typical flow of events for a source of commands is to subscribe to topic 'rfxcom/response', send a command, including it's identifier, to topic 'rfxcom/command' and wait for a response. If a response comes in with another identifier, it will be silently ignored. If a response comes in with the correct identifier, the identifier is stripped and the response is acted upon. (This method looks like Ethernet: a packet with a destination address matching the address of the network interface is accepted, a packet with another (unicast) destination address is silently ignored.)
 
-## Modules
+## Script mqtt.rfxcom.py
+Script mqtt.rfxcom.py maps a command received via topic 'rfxcom/command' onto a command send to the RFXcom transceiver. It maps the response from the transceiver onto a response on topic 'rfxcom/response', using the (source) identifier and the packet sequence number from the associated command. The script also maps any unsolicited response onto a message on topic 'rfxcom/message'. The latter does not contain a source identifier.
 
+The script contains a thread named 'Dispatcher'. It takes a command, sends it to the transceiver and waits for the response. If no response comes in, a NACK response is generated. The next command is not send to the transceiver until a response is either received or generated. This thread thus implements a simple flow control mechanism, using a transmit window of only one packet.
+
+The thread 'Dispatcher' also makes the sequence numbers between any source and this script and between this script and the transceiver independent of one another. It rewrites the sequence number in the commands send to the transceiver, and rewrites the sequence number in a response before sending it to it's source. The sequence number in an unsolicited response is not modified.
+
+Below a top level view of the structure of the script is shown.
+
+<img src="https://raw.githubusercontent.com/wnelis/RFXcom/master/docs/tlad.png" >
+
+Thread Mqtt initiates and maintains the connection with the MQTT broker. It moves packets between queues and the MQTT broker without interpretation or modification. Similarly, thread Rfxcom initiates and maintains the (serial) connection with the transceiver, and it moves packets between queues and the transceiver without interpretation or modification, however with one exception: a reset command is silently ignored. As a result thread Dispatcher does not have to take care of the state of the connection to either the transceiver or the broker and has a simple interface in both directions (a queue). The queues also act as a buffer, to smoothen the flow if necessary. 
+
+## Modules
 Script mqtt.rfxcom.py uses additional modules to implement a finite state machine, to create a watchdog timer and to create threads which can be stopped in a graceful way.
 
 ### bfsm.py
@@ -25,4 +37,7 @@ The main loop is normally put in method run(), but this method is already define
 
 ### watchdog.py
 Module watchdog.py define a class for a simple watchdog timer. A timer can be started, stopped and restarted.
+
+## Test enviroment
+Script mqtt.rfxcom.py is tested (and in use) on a Raspberry Pi 3B running Raspbian 10 (buster). The MQTT broker is also running on this Raspberry Pi.
 
