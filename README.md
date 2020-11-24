@@ -39,5 +39,5 @@ The main loop is normally put in method run(), but this method is already define
 Module watchdog.py define a class for a simple watchdog timer. A timer can be started, stopped and restarted.
 
 ## Test enviroment
-Script mqtt.rfxcom.py is tested (and in use) on a Raspberry Pi 3B running Raspbian 10 (buster). The MQTT broker is also running on this Raspberry Pi.
+Script mqtt.rfxcom.py is tested (and in use) on a Raspberry Pi 3B running Raspbian 10 (buster). The MQTT broker is also running on this Raspberry Pi. An RFXcom RFXtrx433XL is in use as a transceiver, which is attached to a USB port of the aforementioned Raspberry Pi. Script mqtt.rfxcom.py uses about 40 CPU seconds per day in this environment.
 
