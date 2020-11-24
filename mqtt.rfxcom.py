@@ -61,13 +61,13 @@ import watchdog				# Watchdog timer
 # =======================
 #
 __version__     = 0.10
-_debug_submqttm_= True			# Set debug mode
+_debug_submqttm_= False			# Set debug mode
 LfDebug= '/home/pi/rfxcom/debug.log'	# Debug log file name
 
 #
 # MQTT related installation constants.
 #
-MqtBroker= '127.0.0.1'			# Network address of MQTT broker
+MqtBroker= 'your.broker.address'	# Network address of MQTT broker
 MqtClient= 'rfxcom'			# Name of MQTT client
 MqtTpcCmd= 'rfxcom/command'
 MqtTpcRsp= 'rfxcom/response'
@@ -209,10 +209,7 @@ class Mqtt( BaseThread ):
  #
   def _on_message( self, client, userdata, message ):
     # message is a class with members topic, payload, qos and retain.
-#   now= time.time()			# Time of receipt of message
-#   MqtQueCmd.put( (message.payload,now) )
     MqtQueCmd.put( message.payload )
-    self.LogMessage( '  cmd <{}>'.format(message.payload) )  # TEST
 
  #
  # Private method _connect builds an MQTT client object, creates a connection to
@@ -248,7 +245,6 @@ class Mqtt( BaseThread ):
     rsp= MqtQueRsp.get()
     if rsp is None:  return
     self.client.publish( MqtTpcRsp, rsp )
-    self.LogMessage( '  rsp <{}>'.format(rsp) )  # TEST
 
  #
  # Method write_msg is started as a thread. It takes the unsolicited messages
@@ -259,7 +255,6 @@ class Mqtt( BaseThread ):
       msg= MqtQueMsg.get()		# Wait for unsolicited message
       if msg is None:  break		# Stop if state has changed
       self.client.publish( MqtTpcMsg, msg )
-      self.LogMessage( '  msg <{}>'.format(msg) )  # TEST
 
  #
  # Method loop is a very small fsm, which initiates or restarts the connection
