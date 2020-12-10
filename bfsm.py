@@ -12,50 +12,26 @@
 # next stimulus. Some internal stimuli are in fact modifiers on the stimulus
 # being handled: these are passed via the high-priority queue.
 #
+# If the stimulus equals the special value 'Revert', the next state will be the
+# previous state of the FSM rather than the state defined in the transition
+# matrix. This feature may come handy in case of error and time-out handling.
+#
 # In addition to event actions, there are state actions. A state action depends
-# only on the state. These are performed after entering a state and just before
-# the event action is performed. If a state action returns a True value, the
-# event action will be invoked too, but if it returns a False value, the event
-# action will be skipped.
+# only on the state. These are performed upon entry of a state and before the
+# event action is performed.
 #
 # If this FSM will be part of an object, in which case the actions will be
 # methods of the embedding object, the references to the actions should be
 # 'bound method references'. This can be enforced using function
 # types.MethodType.
 #
-# Version 0.00, W.J.M. Nelis, wim.nelis@ziggo.nl, 2018.01
-#
-# Version 0.01, W.J.M. Nelis, wim.nelis@ziggo.nl, 2018.12
-# - Stop experiment with asyncio. This implies that the FSM is no longer a long
-#   running thread, which blocks until a stimulus arrives, but becomes a
-#   function which is invoked to handle one or a few stimuli. It returns control
-#   to the caller once done.
-# - Build the list of states and the list of stimuli from the matrix.
-# - Add comment sections.
-#
-# Version 0.02, W.J.M. Nelis, wim.nelis@ziggo.nl, 2019.01
-# - Add state actions in addition to the event actions. A state action depends
-#   only on the state. These are performed after entering a state and just
-#   before the event action is performed. If a state action returns a True
-#   value, the event action will be invoked too, but if it returns a False
-#   value, the event action will be skipped.
-# - For convenience a single watchdog-timer, named wdt, is created together with
-#   the FSM. It is not used within this class.
-#
-# Version 0.03, W.J.M. Nelis, wim.nelis@ziggo.nl, 2020.02
-# - Methods ReportEvent and HandleEvent accept an optional parameter. This
-#   parameter is accessible in instance variable self.Parametr when the
-#   associated action is performed.
-#
-# Version 0.04, W.J.M. Nelis, wim.nelis@ziggo.nl, 2020.05
-# - Remove class WatchdogTimer. It is put into a separate module.
-# - If an action is in fact a method, it is up to the caller to make sure that
-#   those actions are 'bound method references'. The poor man's solution to pass
-#   an additional parameter with the value of self is removed.
+# Written by W.J.M. Nelis, wim.nelis@ziggo.nl, 2018.01
 #
 import queue
 
-_debug_fsm_= True			# Control debug output
+_debug_fsm_= False			# Control debug output
+_state_init_ = 'Init'			# Required state
+_stim_revert_= 'revert'			# Stimulus to revert to previous state
 
 class Bfsm:
   '''A very basic Finite State Machine'''
@@ -76,11 +52,14 @@ class Bfsm:
 
    # Check the matrix to be complete, and see if the new state in each entry
    # does exist.
+    assert _state_init_ in self.States	# This state should be defined
     for State in self.States:
 #     assert State in Matrix		# This assertion should never fail
       for Stim in self.Stimuli:
         assert Stim in Matrix[State]
         assert Matrix[State][Stim][0] in self.States
+        if Stim == _stim_revert_:	# With revert stimulus, point to same state
+          assert Matrix[State][Stim][0] == State
 
    # If a list of state actions is specified, make sure it contains an entry for
    # each state.
@@ -106,7 +85,7 @@ class Bfsm:
  # empty the interpreter stops, that is it returns control to it's caller.
   def _Interpret( self ):
     trace= []				# Trace of {state,stimulus} history
-    while ( 1 ):
+    while ( True ):
       Stim= None
       if   not self.PriQueue.empty():
         Stim=  self.PriQueue.get()
@@ -115,7 +94,7 @@ class Bfsm:
       if Stim is None:
         return trace
 
-      if type(Stim) is tuple:
+      if type(Stim) is tuple  and  len(Stim) == 2:
         (Stim,self.Parametr)= Stim[:]
       elif type(Stim) is str:
         self.Parametr= None
@@ -125,21 +104,27 @@ class Bfsm:
       if _debug_fsm_:
         trace.append( "State: {}, Stim: {}, Par: {}".format(
                       self.State, Stim, self.Parametr ) )
-      assert self.Stimuli.count( Stim ) == 1
+      assert Stim in self.Stimuli
       (NewState,Action)= self.Matrix[self.State][Stim][:]
-#     assert self.States.count( NewState ) == 1
+  # Handle the special stimulus to revert to the previous state. It does not use
+  # the state as defined in the transition matrix, but the previous state
+  # maintained by the fsm interpreter.
+      if Stim == _stim_revert_:
+        assert self.PrvState is not None
+        NewState= self.PrvState
 
+  # Perform the state action if it defined for the next state.
       self.Stimulus= Stim
       if self.StaAct is not None:	# Do state action
-        if self.StaAct[self.State] is not None:
+        if self.StaAct[NewState] is not None:
           self.NxtState= NewState
-          if not self.StaAct[self.State]():
-            continue
+          self.StaAct[NewState]()
+
+  # Perform the event action and change the state.
       if self.Parametr is None:
         Action()
       else:
         Action( self.Parametr )
-
       self.PrvState= self.State
       self.State   = NewState
       self.NxtState= None
@@ -147,7 +132,7 @@ class Bfsm:
  # Method ReportEvent enters the supplied stimulus in the default queue and
  # returns. The stimulus will be handled when method HandleEvent is called.
   def ReportEvent( self, Stim, Par=None ):
-    assert self.Stimuli.count( Stim ) == 1
+    assert Stim in self.Stimuli
     if Par is None:
       self.DefQueue.put( Stim )
     else:
@@ -157,7 +142,7 @@ class Bfsm:
  # Typically, this method is called from an action invoked by this FSM, causing
  # this stimulus to be handled directly upon return from the action.
   def AugmentEvent( self, Stim ):
-    assert self.Stimuli.count( Stim ) == 1
+    assert Stim in self.Stimuli
     self.PriQueue.put( Stim )
 
  # Method HandleEvent enters the supplied stimulus in the default queue and
