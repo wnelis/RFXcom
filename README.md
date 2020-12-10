@@ -1,9 +1,11 @@
 # RFXcom
 
 ## Introduction
-RFXcom has created a few transceivers for use in the 433 [MHz] RF band. As the name implies, a transceiver can both send and receive packets. Moreover, the RFXcom transceivers support multiple protocols, making them perfect devices to control multiple devices of multiple brands. Some domotica controllers, like domoticz, therefore also have a driver to access an RFXcom transceiver to acquire data and send commands using multiple protocols to multiple types of devices. However, even in these cases, only a single program has access, via a serial USB connection, to the transceiver itself.
+RFXcom has created a few transceivers for use in the 433 [MHz] RF band. As the name implies, a transceiver can both send and receive packets. Moreover, the RFXcom transceivers support multiple protocols, making them perfect devices to control multiple devices of multiple brands. Some home automation systems, like domoticz, therefore also have a driver to access an RFXcom transceiver to acquire data and send commands using multiple protocols to multiple types of devices. However, even in these cases, only a single program has access, via a serial USB connection, to the transceiver itself.
 
 Python script mqtt.rfxcom.py offers is a multiplexer, which accepts commands via MQTT and sends the response back via MQTT. The many-to-one and the one-to-many facilities of MQTT are used to offer independent and simultaneous access from multiple programs to the RFXcom transceiver. Moreover, the programs using the transceiver no longer need to run on the machine to which the transceiver is physically connected. Thus it becomes possible to have a program which receives and analyses the unsolicited responses received by the RFXcom transceiver to run on some machine in your (local) network while at the same time another program, on possibly another computer, is controlling the lights.
+
+Script mqtt.rfxcom.py does not attempt to interpret the data passing by between the MQTT broker and the transceiver, with a few exceptions. The first exception is that is ignores the reset command. Note that in this case no response need to be sent back. The second exception is the handling of sequence numbers. The sequence numbers between the external command source and this script is independent and unrelated to the sequence numbers between this script and the transceiver. However, in all cases a response will have the same sequence number as the associated command.
 
 ## Access
 As multiple programs can access the transceiver, there must be some way to send the response back to the originator of the command. In version 0.10 of script mqtt.rfxcom.py, the method chosen is to prepend an identifier to the command, which is stripped before the command is send to the transceiver. Upon receipt of the response, the identifier is prepended to the response.
@@ -15,7 +17,7 @@ The structure of a command is `<Identifier>;<Command>` and similarly is the stru
   20201124 065202 mqtt rsp <b'monzm;\x02\x01\x00\x00'>
 ```
 
-Note that if no response is received from the transceiver within 3.5 seconds, a 'negative acknowledge' (NAK) is generated. The content of this NAK is `b'\x02\x01\x00\x02'`
+Note that if no response is received from the transceiver within 3.5 seconds, a 'negative acknowledge' (NAK) is generated. The content of this NAK is `b'\x02\x01\x00\x02'`, in which the sequence number is set to the sequence number in the command.
 
 The typical flow of events for a source of commands is to subscribe to topic 'rfxcom/response', send a command, including it's identifier, to topic 'rfxcom/command' and wait for a response. If a response comes in with another identifier, it will be silently ignored. If a response comes in with the correct identifier, the identifier is stripped and the response is acted upon. (This method looks like Ethernet: a packet with a destination address matching the address of the network interface is accepted, a packet with another (unicast) destination address is silently ignored.)
 
