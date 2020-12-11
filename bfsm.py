@@ -12,9 +12,9 @@
 # next stimulus. Some internal stimuli are in fact modifiers on the stimulus
 # being handled: these are passed via the high-priority queue.
 #
-# If the stimulus equals the special value 'Revert', the next state will be the
-# previous state of the FSM rather than the state defined in the transition
-# matrix. This feature may come handy in case of error and time-out handling.
+# If the new state equals the special value 'Revert', the next state will be the
+# previous state of the FSM. This feature may come handy in case of error and
+# time-out handling.
 #
 # In addition to event actions, there are state actions. A state action depends
 # only on the state. These are performed upon entry of a state and before the
@@ -29,9 +29,14 @@
 #
 import queue
 
-_debug_fsm_= False			# Control debug output
+_debug_fsm_= True			# Control debug output
+# Define the initial state of the fsm. This state MUST be defined in the
+# transition matrix.
 _state_init_ = 'Init'			# Required state
-_stim_revert_= 'revert'			# Stimulus to revert to previous state
+# Define the pseudo state which signals the fsm to revert to the previous state.
+# This state can only be used as the 'new state', it cannot be used as a (valid)
+# state to address an element in the transition matrix.
+_state_revert_= 'Revert'		# Pseudo state, revert to previous state
 
 class Bfsm:
   '''A very basic Finite State Machine'''
@@ -53,27 +58,28 @@ class Bfsm:
    # Check the matrix to be complete, and see if the new state in each entry
    # does exist.
     assert _state_init_ in self.States	# This state should be defined
+    assert _state_revert_ not in self.States
     for State in self.States:
 #     assert State in Matrix		# This assertion should never fail
       for Stim in self.Stimuli:
         assert Stim in Matrix[State]
-        assert Matrix[State][Stim][0] in self.States
-        if Stim == _stim_revert_:	# With revert stimulus, point to same state
-          assert Matrix[State][Stim][0] == State
+        nextstate= Matrix[State][Stim][0]
+        if nextstate != _state_revert_:
+          assert nextstate in self.States
 
    # If a list of state actions is specified, make sure it contains an entry for
    # each state.
     if StaAct is not None:
-      for State in self.States:
-        self.StaAct.setdefault( State, None )
       for State in StaAct:
         assert State in self.States
+      for State in self.States:
+        self.StaAct.setdefault( State, None )
 
    # Define the queues to pass the stimuli, both with normal and with high
    # priority. Preset the object variables.
     self.DefQueue= queue.Queue( 16 )
     self.PriQueue= queue.Queue(  2 )
-    self.State   = 'Init'		# Current state
+    self.State   = _state_init_		# Current state
     self.PrvState= None			# Previous state
     self.NxtState= None			# Next state
     self.Stimulus= None			# Event
@@ -81,8 +87,8 @@ class Bfsm:
 
  # Private method _Interpret is the interpreter of the BFSM. It fetches the next
  # stimulus from either the high-prior queue or the default queue, determines
- # it's new state and invokes the associated action. If the stimuli queues are
- # empty the interpreter stops, that is it returns control to it's caller.
+ # it's new state and invokes the associated action(s). If the stimuli queues
+ # are empty the interpreter stops, that is it returns control to it's caller.
   def _Interpret( self ):
     trace= []				# Trace of {state,stimulus} history
     while ( True ):
@@ -106,10 +112,9 @@ class Bfsm:
                       self.State, Stim, self.Parametr ) )
       assert Stim in self.Stimuli
       (NewState,Action)= self.Matrix[self.State][Stim][:]
-  # Handle the special stimulus to revert to the previous state. It does not use
-  # the state as defined in the transition matrix, but the previous state
-  # maintained by the fsm interpreter.
-      if Stim == _stim_revert_:
+  # Handle the special (pseudo) state to revert to the previous state. It uses
+  # the previous state maintained by the fsm interpreter.
+      if NewState == _state_revert_:
         assert self.PrvState is not None
         NewState= self.PrvState
 
