@@ -62,6 +62,9 @@ class StoppableThread( threading.Thread ):
     except Exception as e:
       if self._on_terminate is not None:
         self._on_terminate( self.name, str(e) )
+    except:
+      if self._on_terminate is not None:
+        self._on_terminate( self.name, None )
     else:
       if self._on_terminate is not None:
         self._on_terminate( self.name, None )
