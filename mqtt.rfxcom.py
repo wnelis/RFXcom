@@ -53,20 +53,20 @@ __version__     = 0.20
 # In debug mode more messages are generated and those message are written to the
 # file specified in constant LfDebug. If debug mode is disabled, less messages
 # are generated and those messages are written to the local syslog server.
-_debug_mqtt_rfx_= True			# Flag: debug mode
-LfDebug= '/home/pi/rfxcom/debug.log'	# Debug log file name
+_debug_mqtt_rfx_= False			# Flag: debug mode
+LfDebug= '/full/path/to/debug.log'	# Debug log file name
 # Optionally, this script can push both status and statistics periodically using
 # a fixed topic. A possible use of this feature is to address a Xymon client,
 # which transforms those MQTT messages into HTML-encoded messages which are sent
 # to a Xymon server.
-_include_push_  = True			# Flag: push info periodically
+_include_push_  = False			# Flag: push info periodically
 _push_srcid_    = 'xymon'		# Pseudo source identifier
 _push_timing_   = ( 300, 3 )		# Timing: repeat push every 300 [s]
 
 #
 # MQTT related installation constants.
 #
-MqtBroker= '127.0.0.1'			# Network address of MQTT broker
+MqtBroker= 'your.broker.address'	# Network address of MQTT broker
 MqtClient= 'rfxcom'			# Name of MQTT client
 MqtTpcCmd= 'rfxcom/command'		# Topic without source identifier
 MqtTpcRsp= 'rfxcom/response'		# Topic without source identifier
