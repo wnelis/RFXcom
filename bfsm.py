@@ -120,9 +120,9 @@ class Bfsm:
 
   # Perform the state action if it defined for the next state.
       self.Stimulus= Stim
+      self.NxtState= NewState
       if self.StaAct is not None:	# Do state action
         if self.StaAct[NewState] is not None:
-          self.NxtState= NewState
           self.StaAct[NewState]()
 
   # Perform the event action and change the state.
