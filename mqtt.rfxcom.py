@@ -3,47 +3,36 @@
 # Script mqtt.rfxcom.py allows for multiple programs to access simultaneously
 # and independently an RFXcom RFXtrx433XL transceiver. As intermediate
 # communications channel MQTT messages are used. This script subscribes to topic
-# RFXcom/command, sends the received commands to the transceiver and publishes
-# the responses via topic RFXcom/response. Unsolicited messages are published
-# via topic RFXcom/message.
+# rfxcom/command/#, sends the received commands to the transceiver and publishes
+# the responses via topic rfxcom/response/#. Unsolicited messages are published
+# via topic rfxcom/message.
 #
-# One or more scripts may publish their commands on topic RFCxom/command and
-# will receive the responses via topic RFXcom/response. These scripts should
-# send messages using the following format:
-#   <SourceName>;<RfxcomMessage>
-# in which <SourceName> is a short and unique identifier of the script. The
-# identifier should not contain a semicolon. <RfxcomMessage> is a complete
-# message for the transceiver, however without the initial byte containing the
-# length. The <SourceName>, followed by a semicolon, will be prepended to the
-# associated response. The scripts should discard, without any (error) message,
-# those responses starting with a <SourceName> which does not match their name.
+# A script may publish it's commands on topic rfxcom/command/<SourceName> and it
+# will receive the responses via topic rfxcom/response/<SourceName>, in which
+# <SourceName> is a short and unique identifier of the script. The command is a
+# complete message for the transceiver, however without an initial byte
+# containing the length of the rest of the message.
 #
-# (Note: This script moves packets, basically without altering them, between two
-#  media. In OSI terms this script is a bridge, operating at layer 2 of the OSI
-#  model. Each packet to or from the RFXcom transceiver starts with a byte
-#  specifying the length of the rest of the packet. The length field is
-#  considered to be the OSI L2 header.)
+# Note: This script moves packets, basically without altering them, between two
+#   media. In OSI terms this script is a bridge, operating at layer 2 of the OSI
+#   model. Each packet to or from the RFXcom transceiver starts with a byte
+#   specifying the length of the rest of the packet. The length field is
+#   considered to be the OSI L2 header. Thus this header is added when sending
+#   to the transceiver and removed when receiving from the transceiver.
 #
 # Reminders/to do:
-# - Use another layer in the topic hierarchy for addressing the sources. A
-#   source named 'ASource' sends a command using topic "rfxcom/command/ASource'
-#   and expects the response on topic 'rfxcom/response/ASource'.
 # - A method is needed to assure that each source has a unique name.
-# - The reset command sent via topic 'rfxcom/command(/#)' is silently ignored.
 # - The last mode command for each source should be remembered. Upon setting the
 #   mode by any source, the combined mode should be sent to the transceiver.
 #   This feature will only work in a rather static environment, as there is no
 #   way for a source to tell (via MQTT) that it is stopping. Thus adding a
 #   source and mode is simple, removing them is difficult.
-# - Content of other commands is not inspected / checked.
-# - Add thread Reporter, which reports the statistics to MQTT. It requires
-#   script submqttm.py to accept a wildcard, as the number of sources is not
-#   known a priori.
 # - It is tempting to define own codes for a negative NACK.
 #
 # Written by W.J.M. Nelis, wim.nelis@ziggo.nl, 2020.10
 #
 import bfsm				# Basic finite state machine
+import json				# Encode structure to sent via MQTT
 import paho.mqtt.client as mqtt		# MQTT publisher / subscriber
 import queue				# Inter thread communication
 import re				# Intelligent string parsing
@@ -60,26 +49,44 @@ import watchdog				# Watchdog timer
 # Installation constants.
 # =======================
 #
-__version__     = 0.10
-_debug_submqttm_= False			# Set debug mode
+__version__     = 0.20
+# In debug mode more messages are generated and those message are written to the
+# file specified in constant LfDebug. If debug mode is disabled, less messages
+# are generated and those messages are written to the local syslog server.
+_debug_mqtt_rfx_= True			# Flag: debug mode
 LfDebug= '/home/pi/rfxcom/debug.log'	# Debug log file name
+# Optionally, this script can push both status and statistics periodically using
+# a fixed topic. A possible use of this feature is to address a Xymon client,
+# which transforms those MQTT messages into HTML-encoded messages which are sent
+# to a Xymon server.
+_include_push_  = True			# Flag: push info periodically
+_push_srcid_    = 'xymon'		# Pseudo source identifier
+_push_timing_   = ( 300, 3 )		# Timing: repeat push every 300 [s]
 
 #
 # MQTT related installation constants.
 #
-MqtBroker= 'your.broker.address'	# Network address of MQTT broker
+MqtBroker= '127.0.0.1'			# Network address of MQTT broker
 MqtClient= 'rfxcom'			# Name of MQTT client
-MqtTpcCmd= 'rfxcom/command'
-MqtTpcRsp= 'rfxcom/response'
+MqtTpcCmd= 'rfxcom/command'		# Topic without source identifier
+MqtTpcRsp= 'rfxcom/response'		# Topic without source identifier
 MqtTpcMsg= 'rfxcom/message'
 #
-MqtTpcSta= 'rfxcom/stats/'		# Head of statistics hierarchie
+MqtTpcMuxCon= 'rfxcom_bridge/connected'
+MqtTpcMuxPsa= 'rfxcom_bridge/status'		# Topic without source identifier
+MqtTpcMuxPsi= 'rfxcom_bridge/statistics'	# Topic without source identifier
+# MqtTpcMuxPco= 'rfxcom_bridge/config'		# Topic without source identifier
+MqtTpcMuxGet= 'rfxcom_bridge/get'		# Common prefix of pull commands
+MqtTpcMuxGsu= 'rfxcom_bridge/get/status'	# Topic without source identifier
+MqtTpcMuxGsi= 'rfxcom_bridge/get/statistics'	# Topic without source identifier
+# MqtTpcMuxGco= 'rfxcom_bridge/get/config'	# Topic without source identifier
 
 #
-# FSM related installation constants.
+# Finite state machine (fsm) related installation constants.
 #
 FsmStiCmd= 'Cmd'			# Stimulus 'command received'
 FsmStiRsp= 'Rsp'			# Stimulus 'reponse received'
+FsmStiMsg= 'Msg'			# Stimulus 'message received'
 FsmStiTim= 'Tmt'			# Stimulus 'Time out'
 
 #
@@ -111,31 +118,38 @@ RfxRspNegAck   = b'\x02\x01\x00\x02'	# Transceiver NAK response
 dlfo= None				# Debug log file object
 #
 # Mqtt related global variables.
-# Queues between threads mqtt and dispatcher.
+# Queues between threads Mqtt and Dispatcher.
 #
 MqtQueCmd= queue.Queue()		# Commands to RFXcom
 MqtQueRsp= queue.Queue()		# Responses from RFXcom
 MqtQueMsg= queue.Queue()		# Unsolicited responses from RFXcom
 #
 # RFXcom related global variables.
-# Queues between threads rfxcom and dispatcher.
+# Queues between threads Rfxcom and Dispatcher.
 #
 RfxQueCmd= queue.Queue()		# Commands to RFXcom
 RfxQueRsp= queue.Queue()		# (Unsolicited) responses from RFXcom
+#
+# Control plane related global variables.
+# Queues between threads Mqtt and Controller.
+#
+CtlQueIng= queue.Queue()		# Ingress, messages to Controller
+CtlQueEgr= queue.Queue()		# Egress, messages from Controller
 
 
 #
 # Class definitions.
 # ==================
 #
-# Class BaseThread extends class StoppableThread with method LogMessage.
+# Abstract class BaseThread extends class StoppableThread with method
+# LogMessage.
 #
 class BaseThread( StoppableThread.StoppableThread ):
 
  #
  # Method LogMessage sends a message to the local syslog server.
  #
-  if _debug_submqttm_:
+  if _debug_mqtt_rfx_:
     def LogMessage( self, Msg ):
       tom= time.strftime( '%Y%m%d %H%M%S' )
       dlfo.write( ' '.join( (tom,self.name,Msg,'\n') ) )
@@ -145,6 +159,59 @@ class BaseThread( StoppableThread.StoppableThread ):
       syslog.openlog( 'MqttRfx', 0, syslog.LOG_LOCAL6 )
       syslog.syslog ( ' '.join( (self.name,Msg) ) )
       syslog.closelog()
+
+
+#
+# Abstract class ControlThread extends class BaseThread with two methods which
+# collect and send either the status or the statistics of this bridge.
+#
+class ControlThread( BaseThread ):
+  global threads
+
+  def __init__( self, *args, **kwargs ):
+    super().__init__( *args, **kwargs )
+    self.bridge= dict(
+      bridge_version = __version__,	# Script version number
+      bridge_uptime  = time.time()	# UTS of start of script
+    )
+    self.rfxcom= None			# Ref to thread Rfxcom
+    self.dsptch= None			# Ref to thread Dispatcher
+    self.mqtt  = None			# Ref to thread Mqtt
+    time.sleep( 1 )			# Wait for all threads to be created
+    for t in threads:
+      if   t.name == 'rfxcom':
+        self.rfxcom= t
+      elif t.name == 'dispatch':
+        self.dsptch= t
+      elif t.name == 'mqtt':
+        self.mqtt  = t
+    assert self.rfxcom is not None
+    assert self.dsptch is not None
+    assert self.mqtt   is not None
+
+ #
+ # Private method _send_status collects the status information and forwards it
+ # as a JSON-encoded message to thread Mqtt for transmission.
+ #
+  def _send_status( self, src, uts ):
+    stats= {}				# Create empty result area
+    stats['Device']= self.rfxcom.device	# RFXcom device information
+    stats['Connection']= 'On' if self.rfxcom.state == 'run' else 'Off'
+    CtlQueEgr.put( (MqtTpcMuxPsa+'/'+src,json.dumps(stats),uts) )
+
+ #
+ # Private method _send_statistics collects the statistics and forwards them as
+ # a JSON-encoded message to thread Mqtt for transmission.
+ #
+  def _send_statistics( self, src, uts ):
+    stats= {}				# Create empty result area
+    stats['Bridge']= self.bridge	# Bridge parameters
+    stats['USB'   ]= self.rfxcom.stats	# RFXcom throughput figures
+    stats['Msg'   ]= self.dsptch.msgsts	# RFXcom message statistics
+    stats['Cmd'   ]= self.dsptch.cmdsts	# RFXcom cmd/rsp per source
+    stats['Error' ]= self.dsptch.errsts	# Errors detected by dispatcher
+    stats['Mqtt'  ]= self.mqtt.stats	# Mqtt throughput figures
+    CtlQueEgr.put( (MqtTpcMuxPsi+'/'+src,json.dumps(stats),uts) )
 
 
 #
@@ -165,9 +232,21 @@ class Mqtt( BaseThread ):
 
   def __init__( self, *args, **kwargs ):
     super().__init__( *args, **kwargs )
-    self.client= None
+    self.client= None			# MQTT client object
     self.state = 'init'
-    self.thread= None
+    self.thrrfx= None			# Thread to move RFXcom messages
+    self.thrctl= None			# Thread to move controller push messages
+    self.stats = dict(
+      mqtt_resets = 0,			# MQTT connection reset count
+      topic_errors= 0,			# Unrecognised topics
+      cmd_errors  = 0,			# Syntax errors in commands
+      ingress_packets     = 0,		# Ingress packet count
+      ingress_total_octets= 0,		# Ingress octet count
+      ingress_data_octets = 0,		# Ingress payload octet count
+      egress_packets      = 0,		# Egress packet count
+      egress_total_octets = 0,		# Egress octet count
+      egress_data_octets  = 0,		# Egress payload octet count
+    )
 
  #
  # Call-back _on_connect is invoked when attempting to create a connection to
@@ -180,8 +259,11 @@ class Mqtt( BaseThread ):
       self.LogMessage( 'Connected to broker' )
     elif rc == 3:
       self.LogMessage( 'Connection to broker failed' )
-      MqtQueMsg.put( None )		# Wake up child thread
       self.state= 'restart'		# Try again
+      MqtQueMsg.put( None )		# Wake up child threads
+      MqtQueRsp.put( None )
+      CtlQueEgr.put( None )
+      self.stats['mqtt_resets']+= 1	# Update statistics
     else:
       self.LogMessage( 'Connection to broker failed, fatal error' )
       self.stop()			# Irrecoverable error
@@ -197,42 +279,79 @@ class Mqtt( BaseThread ):
       self.LogMessage( 'Disconnected from broker' )
     else:
       self.LogMessage( 'Unexpected disconnect from broker' )
-      MqtQueMsg.put( None )		# Wake up child thread
+      self.client= None			# Prevent another disconnect
       self.state= 'restart'		# Try to recover
+      MqtQueMsg.put( None )		# Wake up child threads
+      MqtQueRsp.put( None )
+      CtlQueEgr.put( None )
+      self.stats['mqtt_resets']+= 1	# Update statistics
 
  #
- # Call-back _on_message moves any received message, which must be an RFXcom
- # transceiver command, immediately to an intermediate queue. Thread dispatch
- # will read those messages in it's own pace.
- #
- # Note: type(message.payload) is bytes == True
+ # Call-back _on_message moves any received message, which must be either an
+ # RFXcom transceiver command or a get-command to the control plane, immediately
+ # to an intermediate queue. The receivers will read those messages in their own
+ # pace.
  #
   def _on_message( self, client, userdata, message ):
-    # message is a class with members topic, payload, qos and retain.
-    MqtQueCmd.put( message.payload )
+    now= time.time()			# Time of receipt of message
+    pld= message.payload
+    tpc= message.topic
+    self.stats['ingress_packets']     += 1
+    self.stats['ingress_data_octets'] += len(pld)
+    self.stats['ingress_total_octets']+= len(pld) + len(tpc.encode('utf8'))
+
+    try:
+      (tpc,src)= tpc.rsplit( '/', maxsplit=1 )
+    except:
+      self.LogMessage( 'Syntax error in topic: <{}>'.format(message.topic) )
+      self.stats['topic_errors']+= 1
+      return
+    src= src.strip()			# Clean up source identifier
+    if len(src) == 0:			# A source must have been specified
+      self.LogMessage( 'Source not found: <{}>'.format(message.topic) )
+      self.stats['topic_errors']+= 1
+      return
+
+    if   tpc == MqtTpcCmd:		# Check for RFXcom command
+      if type(pld) is str  :  pld= bytearray( pld, 'utf-8' )
+      if type(pld) is bytes:  pld= bytearray( pld )
+      MqtQueCmd.put( (src,pld,now) )
+      if _debug_mqtt_rfx_:
+        self.LogMessage( '  cmd {}:<{}>'.format(src,pld) )
+    elif tpc.find(MqtTpcMuxGet) == 0:	# Check for bridge get command
+      CtlQueIng.put( (tpc,src,pld,now) )
+      if _debug_mqtt_rfx_:
+        self.LogMessage( '  ctl {}/{}:<{}>'.format(tpc,src,pld) )
+    else:
+      self.LogMessage( 'Topic not recognised: <{}/{}>'.format(tpc,src) )
+      self.stats['topic_errors']+= 1
 
  #
  # Private method _connect builds an MQTT client object, creates a connection to
- # the MQTT broker and subscribes to the topic with RFXcom commands. Using
- # loop_start, an additional thread is started to handle the communications with
- # the broker.
+ # the MQTT broker and subscribes to the topics with RFXcom commands and with
+ # the bridge get commands. Using loop_start, an additional thread is started to
+ # handle the communications with the broker.
  #
   def _connect( self ):
-  # Create mqtt client object and connect to broker
+  # Create mqtt client object
     self.client= mqtt.Client( MqtClient )
     self.client.on_connect   = self._on_connect
     self.client.on_disconnect= self._on_disconnect
     self.client.on_message   = self._on_message
+  # Set last will and connect to broker
+    self.client.will_set( MqtTpcMuxCon, 'Off', retain=True )
     self.client.connect( MqtBroker )
-  # Subscribe to RFXcom command channel
-    self.client.subscribe( (MqtTpcCmd,0) )
+  # Subscribe to RFXcom command topics and bridge get-request topics
+    self.client.subscribe( [ (MqtTpcCmd+'/#',0), (MqtTpcMuxGet+'/#',0) ] )
     self.client.loop_start()
+    self.client.publish( MqtTpcMuxCon, 'On', retain=True )
 
  #
  # Private method _disconnect reverses the actions of method _connect.
  #
   def _disconnect( self ):
     if self.client is not None:
+      self.client.publish( MqtTpcMuxCon, 'Off', retain=True )
       self.client.loop_stop()
       self.client.disconnect()
       self.client= None
@@ -244,7 +363,16 @@ class Mqtt( BaseThread ):
   def write_rsp( self ):
     rsp= MqtQueRsp.get()
     if rsp is None:  return
-    self.client.publish( MqtTpcRsp, rsp )
+    assert type(rsp) is tuple, 'Wrong type of queueing vehicle'
+    assert len(rsp) == 2, 'Incorrect length of queueing vehicle'
+    (src,pld)= rsp			# Unwrap tuple
+    tpc= MqtTpcRsp + '/' + src		# Build topic
+    self.client.publish( tpc, pld )
+    self.stats['egress_packets']     += 1
+    self.stats['egress_data_octets'] += len(pld)
+    self.stats['egress_total_octets']+= len(pld) + len(tpc.encode('utf8'))
+    if _debug_mqtt_rfx_:
+      self.LogMessage( '  rsp {}:<{}>'.format(src,pld) )
 
  #
  # Method write_msg is started as a thread. It takes the unsolicited messages
@@ -254,7 +382,33 @@ class Mqtt( BaseThread ):
     while not self.stopped():
       msg= MqtQueMsg.get()		# Wait for unsolicited message
       if msg is None:  break		# Stop if state has changed
+      assert type(msg) is bytearray, 'Wrong type of queueing vehicle'
       self.client.publish( MqtTpcMsg, msg )
+      self.stats['egress_packets']     += 1
+      self.stats['egress_data_octets'] += len(msg)
+      self.stats['egress_total_octets']+= len(msg) + len(MqtTpcMsg.encode('utf8'))
+      if _debug_mqtt_rfx_:
+        self.LogMessage( '  msg <{}>'.format(msg) )
+
+ #
+ # Method write_psh is started as a thread. It takes the pushed statistics,
+ # status and configuration reports received from thread Controller and
+ # publishes them on the MQTT broker.
+ #
+  def write_psh( self ):
+    while not self.stopped():
+      msg= CtlQueEgr.get()		# Wait for pushed message
+      if msg is None:  break		# Stop if state has changed
+      assert type(msg) is tuple, 'Queued item has wrong type'
+      assert len(msg) == 3, 'Queued tuple has wrong length'
+      (tpc,msg,uts)= msg		# Unwrap tuple
+      self.client.publish( tpc, msg )
+      self.stats['egress_packets']     += 1
+      self.stats['egress_data_octets'] += len(msg)
+      self.stats['egress_total_octets']+= len(msg) + len(tpc.encode('utf8'))
+      if _debug_mqtt_rfx_:
+        if not _include_push_  or  not tpc.endswith( '/'+_push_srcid_ ):
+          self.LogMessage( '  psh {}:<{}>'.format(tpc,msg) )
 
  #
  # Method loop is a very small fsm, which initiates or restarts the connection
@@ -267,15 +421,20 @@ class Mqtt( BaseThread ):
     while not self.stopped():
       if   self.state == 'init':
         self._connect()			# Connect and subscribe
-        self.thread= threading.Thread( target=self.write_msg )
-        self.thread.start()
+        self.thrrfx= threading.Thread( target=self.write_msg )
+        self.thrrfx.start()
+        self.thrctl= threading.Thread( target=self.write_psh )
+        self.thrctl.start()
         self.state = 'run'
       elif self.state == 'run':
         self.write_rsp()
       elif self.state == 'restart':
-        if self.thread is not None:
-          self.thread.join()
-          self.thread= None
+        if self.thrrfx is not None:
+          self.thrrfx.join()
+          self.thrrfx= None
+        if self.thrctl is not None:
+          self.thrctl.join()
+          self.thrctl= None
         self._disconnect()
         self.state = 'init'
   #
@@ -290,6 +449,7 @@ class Mqtt( BaseThread ):
     super().stop()			# Request to stop this thread
     MqtQueRsp.put( None )		# Unblock method write_rsp
     MqtQueMsg.put( None )		# Unblock method write_msg
+    CtlQueEgr.put( None )		# Unblock method write_psh
 
 
 #
@@ -299,7 +459,7 @@ class Mqtt( BaseThread ):
 # Class Dispatcher moves the commands, responses and messages (unsolicited
 # responses) between the various queues, while taking care of the addressing and
 # the OSI L2 encapsulation.
-# It implements a flow control mechanism in the direction of the RFXcom
+# It also implements a flow control mechanism in the direction of the RFXcom
 # transceiver with a window size of 1. The source identifier and the sequence
 # number of the command are prepended respectively inserted in the associated
 # response. The multiplexed stream of commands is assigned a new sequence
@@ -307,12 +467,15 @@ class Mqtt( BaseThread ):
 # transceiver.
 #
 class Dispatcher( BaseThread ):
+  '''Move commands and responses between an RFXcom transceiver and an MQTT broker.'''
 
  #
- # Define the call-back functions.
+ # Call-back on_timeout is invoked if the timer, started in the fsm, expires.
+ # Send a timeout stimulus to the fsm.
  #
   def on_timeout( self ):
     self.dfsm.HandleEvent( FsmStiTim )
+    self.errsts['time_outs']+= 1	# Update error statistics
 
  #
  # Define the actions for the finite state machine.
@@ -327,6 +490,7 @@ class Dispatcher( BaseThread ):
   def do_error( self, arg=None ):
     self.LogMessage( 'FSM error, state={}, stim={}, arg=<{}>'.format(
                      self.dfsm.State, self.dfsm.Stimulus, arg ) )
+    self.errsts['fsm_errors']+= 1	# Update error statistics
 
  #
  # Method do_inc_seq increments a sequence number.
@@ -335,50 +499,53 @@ class Dispatcher( BaseThread ):
     return value + 1  if value < 255 else 1
 
  #
- # Method do_syntax checks the syntax of an incoming command. It should start
- # with a source identifier, folllowed by ';', followed by a command to be sent
- # to the RFXcom transceiver. The function returns True iff the syntax is
- # correct.
+ # Method do_syntax checks the syntax of an incoming command. It should be a
+ # tuple containing the source, the payload and the time of arrival. The
+ # function returns True iff the syntax is correct.
  #
   def do_syntax( self, extcmd ):
-    try:
-      (srcid,rawcmd)= extcmd.split( b';', maxsplit=1 )
-    except ValueError:			# Probably no delimiter in command
-      return False			# Wrong syntax
+    assert type(extcmd) is tuple, 'Unexpected format of command'
+    assert len(extcmd) == 3, 'Unexpected itemcount in tuple'
+    (srcid,rawcmd,toa)= extcmd		# Unwrap tuple
+  #
     if len(srcid)  == 0:  return False	# Illegal source identifier
     srcid= srcid.strip()		# Remove surrounding whitespace
     if len(srcid)  == 0:  return False	# Illegal source identifier
     if len(rawcmd) == 0:  return False	# Illegal command
     if len(rawcmd) > 127: return False	# Illegal command
   #
-    if type(rawcmd) is bytes:
-      rawcmd= bytearray( rawcmd )	# Make mutable list of bytes
-    self.cmdisn= rawcmd[2]		# Extract sequence number
-    rawcmd[2]= 0			# Reset sequence number
-    self.cmdraw= rawcmd
-    self.cmdsrc= srcid
-    if srcid not in self.cmdsts:
-      self.cmdsts[srcid]= { 'packet':0, 'octet':0 }
-  #
     return True
 
  #
- # Action do_cmd handles a command received via MQTT. The source identifier is
- # stripped from the command, the sequence number is set, and the raw command is
- # forwarded to the next stage, that is thread Rfxcom.
+ # Action do_cmd handles a command received via MQTT. The source identifier and
+ # the sequence number are saved, a new sequence number is set, and the raw
+ # command is forwarded to the next stage, that is thread Rfxcom.
  #
   def do_cmd( self, cmd ):
     if self.do_syntax( cmd ):
-      self.cmdsts[self.cmdsrc]['packet']+= 1	# Update source statistics
-      self.cmdsts[self.cmdsrc]['octet'] += 1 + len(self.cmdraw)
+      (srcid,rawcmd,toa)= cmd		# Unwrap tuple
+  #
+      if type(rawcmd) is bytes:
+        rawcmd= bytearray( rawcmd )	# Make mutable list of bytes
+      self.cmdisn= rawcmd[2]		# Extract sequence number
+      rawcmd[2]= 0			# Reset sequence number
+      self.cmdraw= rawcmd
+      self.cmdsrc= srcid
+      self.cmdtoa= toa
+      if srcid not in self.cmdsts:
+        self.cmdsts[srcid]= { 'packets':0, 'octets':0, 'sumtime':0 }
+      self.cmdsts[srcid]['packets']+= 1	# Update source statistics
+      self.cmdsts[srcid]['octets'] += 1 + len(rawcmd)
   #
       self.cmdraw[2]= self.cmdesn	# Set egress sequence number
+      self.rspisn   = self.cmdesn	# Expected response sequence number
       self.cmdesn   = self.do_inc_seq( self.cmdesn )
-      self.cmdwdt.reset()		# start watchdog timer
+      self.cmdwdt.reset()		# Start watchdog timer
   #
       RfxQueCmd.put( self.cmdraw )	# Send cmd to RFXcom
     else:
       self.LogMessage( 'Illegal syntax: <{}>'.format(cmd) )
+      self.errsts['cmd_errors']+= 1	# Update error statistics
 
  #
  # Action do_msg handles the receipt of an unsolicited response a.k.a. message.
@@ -386,10 +553,11 @@ class Dispatcher( BaseThread ):
   def do_msg( self, msg ):
     if msg[0] < 0x03:
       self.LogMessage( 'Illegal unsolicited response: <{}>'.format(msg) )
+      self.errsts['msg_errors']+= 1	# Update error statistics
       return
 #   msg[2]= 0				 # Clear sequence number
-    self.msgsts['packet']+= 1
-    self.msgsts['octet' ]+= 1 + len(msg)
+    self.msgsts['packets']+= 1
+    self.msgsts['octets' ]+= 1 + len(msg)
     MqtQueMsg.put( msg )
     return
 
@@ -400,38 +568,51 @@ class Dispatcher( BaseThread ):
   def do_rsp( self, rsp ):
     if rsp[0] > 0x02:			# Check for an unsolicited message
       self.do_msg( rsp )
+      self.dfsm.AugmentEvent( FsmStiMsg )
       return
   #
     if rsp[2] == self.rspisn:
       self.cmdwdt.stop()		# Stop the watchdog timer
-      self.rspisn= self.do_inc_seq( self.rspisn )
       rsp[2]= self.cmdisn		# Restore original sequence number
-      rsp= self.cmdsrc + b';' + rsp
+      rsp= ( self.cmdsrc, rsp )
       MqtQueRsp.put( rsp )		# Move to thread Mqtt
       self.feednc.set()			# Allow for next command
+      self.cmdsts[self.cmdsrc]['sumtime']+= time.time() - self.cmdtoa
+
+  # The sequence number is not correct. The error is only reported. As the
+  # watchdog timer is still running, it will cause a NACK to be sent if no
+  # response with the correct sequence number comes in.
     else:
       self.LogMessage( 'Unexpected sequence number: <{}>'.format(rsp) )
+      self.errsts['rsp_errors']+= 1	# Update statistics
 
+ #
+ # Action do_timeout sends a negative acknowledge response on the last command,
+ # as no response has been received from the RFXcom transceiver (in time).
+ #
   def do_timeout( self ):
     rsp= bytearray(RfxRspNegAck)	# Negative acknowledge response
     rsp[2]= self.cmdisn			# Set sequence number
-    rsp= self.cmdsrc + b';' + rsp
+    rsp= ( self.cmdsrc, rsp )
     MqtQueRsp.put( rsp )		# Move to thread Mqtt
     self.feednc.set()			# Allow for next command
+    self.cmdsts[self.cmdsrc]['sumtim']+= time.time() - self.cmdtoa
 
   def __init__( self, *args, **kwargs ):
     super().__init__( *args, **kwargs )
 
     self.fsmtm= {			# Finite state machine transition matrix
       'Init' : {
-        FsmStiCmd : ( 'Wait', self.do_cmd     ),
-        FsmStiRsp : ( 'Init', self.do_msg     ),
-        FsmStiTim : ( 'Init', self.do_nothing ),
+        FsmStiCmd : ( 'Wait'  , self.do_cmd     ),
+        FsmStiRsp : ( 'Init'  , self.do_msg     ),
+        FsmStiMsg : ( 'Revert', self.do_nothing ),
+        FsmStiTim : ( 'Init'  , self.do_nothing ),
       },
       'Wait' : {
-        FsmStiCmd : ( 'Wait', self.do_error   ),
-        FsmStiRsp : ( 'Init', self.do_rsp     ),
-        FsmStiTim : ( 'Init', self.do_timeout ),
+        FsmStiCmd : ( 'Wait'  , self.do_error   ),
+        FsmStiRsp : ( 'Init'  , self.do_rsp     ),
+        FsmStiMsg : ( 'Revert', self.do_error   ),
+        FsmStiTim : ( 'Init'  , self.do_timeout ),
       }
     }
 
@@ -443,30 +624,46 @@ class Dispatcher( BaseThread ):
     self.cmdisn= 0			# Current command: ingress sequence number
     self.cmdesn= 1			# Current command: egress sequence number
     self.cmdsrc= None			# Current command: source id
+    self.cmdtoa= None			# Current command: time of arrival
     self.cmdwdt= watchdog.WatchdogTimer( 3.5, self.on_timeout )
     self.rspisn= 1			# Next response: sequence number
     self.cmdsts= {}			# Statistics per source
-    self.msgsts= { 'packet':0, 'octet':0 }	# Statistics of the unsolicited responses
+    self.msgsts= { 'packets':0, 'octets':0 }	# Statistics of the unsolicited responses
+    self.errsts= dict(
+      fsm_errors= 0,			# FSM detected errors
+      cmd_errors= 0,			# Command syntax error
+      rsp_errors= 0,			# Response sequence number error
+      msg_errors= 0,			# Message error
+      time_outs = 0,			# Response missing / too late
+    )
 
  #
  # Method cmd_feeder is started as a thread. If the state allows, that is if
  # event self.feednc is set, it gets the next command from queue MqtQueCmd and
- # passes it, with the appropriate stimulus, to the FSM.
+ # passes it, with the appropriate stimulus, to the FSM. Upon receipt of the
+ # associated response, event self.feednc will be set.
  #
   def cmd_feeder( self ):
     while not self.stopped():
       self.feednc.wait()		# Wait for clearance
       self.feednc.clear()		# Remove clearance
-      if self.stopped():  return	# Exit if script needs to stop
+      if self.stopped():  break		# Exit if script needs to stop
       cmd= MqtQueCmd.get()		# Fetch next command
-      if cmd is None:  return		# Exit if script needs to stop
+      if cmd is None:  break		# Exit if script needs to stop
       self.dfsm.HandleEvent( FsmStiCmd, cmd )
 
+ #
+ # Method rsp_feeder gets the next response from the RFXcom transceiver and
+ # passes it, with the appropriate stimulus, to the FSM.
+ #
   def rsp_feeder( self ):
     rsp= RfxQueRsp.get()		# Fetch next response
     if rsp is None:  return		# Exit is script needs to stop
     self.dfsm.HandleEvent( FsmStiRsp, rsp )
 
+ #
+ # Method loop is the 'main program' of this class / thread.
+ #
   def loop( self ):
     self.LogMessage( 'Starting thread' )
     self.feeder= threading.Thread( target=self.cmd_feeder )
@@ -478,9 +675,13 @@ class Dispatcher( BaseThread ):
     self.feeder.join()
     self.LogMessage( 'Stopping thread' )
 
+ #
+ # Method stop stops this thread. Dummy messages are put in queues to unblock
+ # Queue.get method invocations.
+ #
   def stop( self ):
     super().stop()
-    self.feednc.set()
+    self.feednc.set()			# Unblock threads of this thread
     MqtQueCmd.put( None )
     RfxQueRsp.put( None )
 
@@ -494,19 +695,22 @@ class Dispatcher( BaseThread ):
 # on write and is checked and stripped on read.
 #
 class Rfxcom( BaseThread ):
+  '''Interface between dispatcher and the RFXcom transceiver.'''
 
   def __init__( self, *args, **kwargs ):
     super().__init__( *args, **kwargs )
-    self.model = None			# RFXcom device model name
-    self.sn    = None			# RFXcom device serial number
-    self.hardwr= ''			# RFXcom hardware version number
-    self.firmwr= ''			# RFXcom firmware version number
     self.port  = None			# Serial port name
     self.serial= None			# Serial port object instance
     self.thread= None			# Thread reading from serial port
     self.state = 'init'			# Operational state of thread
     self.seqnbr= 0			# Packet sequence number
     self.fails = 0			# Count of successive failures
+    self.device= dict(
+      rfx_model = None,			# RFXcom device model name
+      rfx_sn    = None,			# RFXcom device serial number
+      rfx_hardwr= '',			# RFXcom hardware version number
+      rfx_firmwr= '',			# RFXcom firmware version number
+    )
     self.stats = dict(
       usb_resets         = 0,		# USB connection reset count
       usb_egress_packets = 0,		# USB egress packet count
@@ -526,8 +730,8 @@ class Rfxcom( BaseThread ):
  #
   def _build_connection( self ):
     self.LogMessage( 'Build serial connection' )
-    self.model= None
-    self.sn   = None
+    self.device['rfx_model']= None
+    self.device['rfx_sn'   ]= None
     self.port = None
     if self.serial is not None:		# See if serial connection exists
       self.serial.close()
@@ -544,9 +748,9 @@ class Rfxcom( BaseThread ):
       mo= RfxDevRe.search( line )
       if mo is not None:
         if mo.group(1) == 'RFXCOM':
-          self.model= mo.group(2)
-          self.sn   = mo.group(3)
-          self.port = '/dev/' + mo.group(4)
+          self.device['rfx_model']= mo.group(2)
+          self.device['rfx_sn'   ]= mo.group(3)
+          self.port= '/dev/' + mo.group(4)
     if self.port is None:
       self.LogMessage( 'RFXcom transceiver not found' )
       return False
@@ -581,12 +785,12 @@ class Rfxcom( BaseThread ):
     if len(bfr) != 20:  return False
   # Interpret the received response.
     if bfr[0:4] != RfxRspGetStatus:  return False
-    self.hardwr= '{:d}.{:03d}'.format(bfr[10],bfr[11])	# msg7, msg8
-    self.firmwr= '{:02x}.{:03d}'.format(bfr[13],bfr[5])	# msg10, msg2
+    self.device['rfx_hardwr']= '{:d}.{:03d}'.format(bfr[10],bfr[11])  # msg7, msg8
+    self.device['rfx_firmwr']= '{:02x}.{:03d}'.format(bfr[13],bfr[5]) # msg10, msg2
   # Set the set of enabled protocols to the default set.
     if bfr[6:10] != RfxMode:
       self.LogMessage( 'Activate default set of protocol decoders')
-      bfr= RfxCmdSetMode		# Generic set-mode command
+      bfr= bytearray(RfxCmdSetMode)	# Generic set-mode command
       bfr[6:10]= RfxMode		# Set default protocol selection
       if not self._write( bfr ):  return False
       bfr= self._read( 0.5 )		# Fetch response
@@ -675,25 +879,24 @@ class Rfxcom( BaseThread ):
     while not self.stopped():
       bfr= self._read( 10 )
       if len(bfr) > 0:
-        if _debug_submqttm_:
-          self.LogMessage( 'rsp <{}>'.format(bfr) ) # TEST
         RfxQueRsp.put( bfr )
+        if _debug_mqtt_rfx_:
+          self.LogMessage( 'rsp <{}>'.format(bfr) )
       if self.fails > RfxSerFT:
         RfxQueCmd.put( None )		# Inhibit blocking in method write
         self.state= 'restart'
         break
-    return
 
  #
- # Method write wait for a packet containing either a mode command or a device
+ # Method write waits for a packet containing either a mode command or a device
  # command. The packet is written to the RFXcom transceiver. If writing fails a
  # NAK response is sent back to the source.
  #
   def write( self ):
     bfr= RfxQueCmd.get()
     if bfr is None:  return		# Wake up call, state change(d)
-    if _debug_submqttm_:
-      self.LogMessage( 'cmd <{}>'.format(bfr) ) # TEST
+    if _debug_mqtt_rfx_:
+      self.LogMessage( 'cmd <{}>'.format(bfr) )
     if bfr == RfxCmdReset:  return	# Silently ignore reset command
   #
     self.seqnbr= bfr[2]
@@ -725,7 +928,7 @@ class Rfxcom( BaseThread ):
           else:
             time.sleep( 10 )
         else:
-          time.sleep ( 10 )
+          time.sleep( 10 )
 
   # State run: move user data to and from the RFXcom transceiver.
       elif self.state == 'run':
@@ -743,12 +946,89 @@ class Rfxcom( BaseThread ):
         self.state = 'init'
         self.fails = 0
   #
+    if self.serial is not None:
+      self.serial.close()
     self.LogMessage( 'Stopping thread' )
-# self.serial.close() ??
+
+ #
+ # Method stop stops this thread. Note that method write needs to be unblocked,
+ # but method read will unblock within 10 seconds.
+ #
+  def stop( self ):
+    super().stop()
+    RfxQueCmd.put( None )		# Unblock method write
+
+
+#
+# Class Controller.
+# -----------------
+#
+# Class controller accepts some get-commands sent via MQTT, and replies with the
+# requested information.
+#
+class Controller( ControlThread ):
+  '''Return the status or the statistics of this bridge.'''
+
+  def __init__( self, *args, **kwargs ):
+    super().__init__( *args, **kwargs )
+    self.srcid = None			# Source identifier
+
+ #
+ # Method loop waits for a topic containing a get command. The payload of this
+ # topic is not looked at and is thus irrelevant. If the topic is recognised,
+ # the requested information is sent to the requester.
+ #
+  def loop( self ):
+    self.LogMessage( 'Starting thread' )
+    while not self.stopped():
+      rqst= CtlQueIng.get()
+      if rqst is None:  continue	# Stop thread
+
+      assert type(rqst) is tuple
+      assert len(rqst) == 4
+      (tpc,src,pld,now)= rqst
+      if _include_push_  and  src == _push_srcid_:
+        self.LogMessage( 'Received get command with wrong source identifier' )
+        continue
+
+      if   tpc == MqtTpcMuxGsu:
+        self._send_status( src, now )
+      elif tpc == MqtTpcMuxGsi:
+        self._send_statistics( src, now )
+      else:
+        self.LogMessage( 'Unsupported topic: {}:<{}>'.format(src,tpc) )
+
+    self.LogMessage( 'Stopping thread' )
 
   def stop( self ):
     super().stop()
-    RfxQueCmd.put( None )		# Terminate wait in method write
+    CtlQueIng.put( None )		# Unblock loop
+
+
+#
+# Class Reporter.
+# ---------------
+#
+# Class Reporter reports periodically the state and the statistics to those who
+# are subscribed to the topic. It uses thus a push mechanism. This class acts as
+# if a (periodical) get request is received with source identifier _push_srcid_.
+# Note that no class instantiation is created if installation constant
+# _include_push_ has a False value.
+#
+class Reporter( ControlThread ):
+  '''Report periodically the status and the statistics.'''
+
+  def __init__( self, *args, **kwargs ):
+    super().__init__( *args, **kwargs )
+    self.srcid = _push_srcid_		# Destination identifier
+
+  def loop( self ):
+    self.LogMessage( 'Starting thread' )
+    while not self.stopped():
+      self._send_status    ( self.srcid, time.time() )
+      self._send_statistics( self.srcid, time.time() )
+      self.Wait( *_push_timing_ )	# Push every 5 minutes
+    self.LogMessage( 'Stopping thread' )
 
 
 #
@@ -762,7 +1042,7 @@ MainThread= threading.Event()		# Set to stop this script
 #
 def ReportAndStop( msg ):
   if msg is not None:
-    if _debug_submqttm_:
+    if _debug_mqtt_rfx_:
       dlfo.write( msg + '\n' )
       dlfo.flush()
     else:
@@ -781,8 +1061,8 @@ def HandleSignal( signum, frame ):
 
 #
 # Call-back OnTerminate is invoked whenever a thread stops, either in a normal
-# or in an abnormal (exception) way. In either case, the flag to stop this script
-# is set.
+# or in an abnormal (exception) way. In either case, the flag to stop this
+# script is set.
 #
 def OnTerminate( Name, Except ):
   msg= None
@@ -794,7 +1074,7 @@ def OnTerminate( Name, Except ):
 # Main program.
 # =============
 #
-if _debug_submqttm_:
+if _debug_mqtt_rfx_:
   dlfo= open( LfDebug, 'a' )
 
 #
@@ -807,7 +1087,9 @@ threads= []				# List of active threads
 th0= Rfxcom    ( OnTerminate, name='rfxcom'   ) ;  threads.append(th0) ;  th0.start()
 th1= Dispatcher( OnTerminate, name='dispatch' ) ;  threads.append(th1) ;  th1.start()
 th2= Mqtt      ( OnTerminate, name='mqtt'     ) ;  threads.append(th2) ;  th2.start()
-# th3= Reporter  ( OnTerminate, name='reporter' ) ;  threads.append(th3) ;  th3.start()
+th3= Controller( OnTerminate, name='control'  ) ;  threads.append(th3) ;  th3.start()
+if _include_push_:
+  th4= Reporter( OnTerminate, name='report'   ) ;  threads.append(th4) ;  th4.start()
 
 #
 # Monitor the state of the threads of this script. If one thread dies or if
@@ -826,5 +1108,5 @@ while len(threads) > 0:
   except KeyboardInterrupt:
     MainThread.set()			# Set flag to stop this script
 
-if _debug_submqttm_:
+if _debug_mqtt_rfx_:
   dlfo.close()
