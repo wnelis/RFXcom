@@ -42,8 +42,9 @@ Module bfsm.py defines a class to implement a minimalistic finite state machine.
 
 ### StoppableThread.py
 Module StoppableThread.py defines a class derived from class threading.Thread which extends it with two options regarding stopping:
- A) Event _stop_event is added to the thread as well as methods to set and check this event. The thread itself has to check regularly for the stopped() condition.
- B) A call-back can be specified which is invoked at normal and abnormal termination of the thread. This is incorporated to prevent the main thread controller from polling the status of the thread(s) regularly.
+* Event _stop_event is added to the thread as well as methods to set and check this event. The thread itself has to check regularly for the stopped() condition.
+* A call-back can be specified which is invoked at normal and abnormal termination of the thread. This is incorporated to prevent the main thread controller from polling the status of the thread(s) regularly.
+
 The main loop is normally put in method run(), but this method is already defined in this class and should not be redefined in a derived class. In stead a derived class should define a method named loop() containing the main loop.
 
 ### watchdog.py
