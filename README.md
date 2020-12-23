@@ -17,7 +17,9 @@ The structure of a command topic is `rfxcom/command/<Identifier>` and similarly 
   20201222 165011 mqtt rfxcom/response/monzm:<bytearray(b'\x02\x01\x07\x00')>
 ```
 
-Note that if no response is received from the transceiver within 3.5 seconds, a 'negative acknowledge' (NAK) is generated. The content of this NAK is `b'\x02\x01\x00\x02'`, in which the sequence number is set to the sequence number in the command.
+Note that neither the command not the response start with a byte containing the length. In the example above the first byte contains the packet type.
+
+If no response is received from the transceiver within 3.5 seconds after sending a command, a 'negative acknowledge' (NAK) is generated. The content of this NAK is `b'\x02\x01\x00\x02'`, in which the sequence number is set to the sequence number in the command.
 
 The typical flow of events for a source of commands is to subscribe to topic `rfxcom/response/<Identifier>`, send a command to topic `rfxcom/command/<Identifier>` and wait for a response. A response will come (as script mqtt.rfxcom.py will send a NAK if the transceiver does not send a response in time) and the response is acted upon.
 
