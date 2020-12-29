@@ -40,7 +40,7 @@ Thread Mqtt initiates and maintains the connection with the MQTT broker. It move
 Script mqtt.rfxcom.py uses additional modules to implement a finite state machine, to create a watchdog timer and to create threads which can be stopped in a graceful way.
 
 ### bfsm.py
-Module bfsm.py defines a class to implement a minimalistic finite state machine. It is given a matrix specifying the action for each {state,stimulus] combination, it contains an additional high priority queue to augment the last stimulus and optionally an action when entering a state can be defined.
+Module bfsm.py defines a class to implement a minimalistic finite state machine. It is given a matrix specifying the action for each (state,stimulus) combination, it contains an additional high priority queue to augment the last stimulus and optionally an action when entering a state can be defined.
 
 ### StoppableThread.py
 Module StoppableThread.py defines a class derived from class threading.Thread which extends it with two options regarding stopping:
@@ -50,7 +50,7 @@ Module StoppableThread.py defines a class derived from class threading.Thread wh
 The main loop is normally put in method run(), but this method is already defined in this class and should not be redefined in a derived class. In stead a derived class should define a method named loop() containing the main loop.
 
 ### watchdog.py
-Module watchdog.py define a class for a simple watchdog timer. A timer can be started, stopped and restarted.
+Module watchdog.py defines a class for a simple watchdog timer. A timer can be started, stopped and restarted.
 
 ## Test enviroment
 Script mqtt.rfxcom.py is tested (and in use) on a Raspberry Pi 3B running Raspbian 10 (buster). The MQTT broker is also running on this Raspberry Pi. An RFXcom RFXtrx433XL is in use as a transceiver, which is attached to a USB port of the aforementioned Raspberry Pi. Script mqtt.rfxcom.py uses about 40 CPU seconds per day in this environment.
