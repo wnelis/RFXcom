@@ -93,7 +93,7 @@ class StoppableThread( threading.Thread ):
     Now= time.time()
     ActTim= int( Now )
     ActTim= ( (ActTim+Period-1) // Period ) * Period
-    SlpTim= int( ActTim - Now ) + Delay
+    SlpTim= ActTim - Now + Delay
     if SlpTim < 1.5:  SlpTim+= Period
     self.wait( SlpTim )
 
