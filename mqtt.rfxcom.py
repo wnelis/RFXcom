@@ -72,7 +72,7 @@ MqtTpcCmd= 'rfxcom/command'		# Topic without source identifier
 MqtTpcRsp= 'rfxcom/response'		# Topic without source identifier
 MqtTpcMsg= 'rfxcom/message'
 #
-MqtTpcMuxCon= 'rfxcom_bridge/connected'
+MqtTpcMuxCon= 'connected/rfxcom_bridge'
 MqtTpcMuxPsa= 'rfxcom_bridge/status'		# Topic without source identifier
 MqtTpcMuxPsi= 'rfxcom_bridge/statistics'	# Topic without source identifier
 # MqtTpcMuxPco= 'rfxcom_bridge/config'		# Topic without source identifier
